@@ -23,10 +23,11 @@ import Data.Char (isSpace, toLower)
 import MCP.Server
 import EVM.Dapp (DappInfo(..))
 import EVM.Solidity (SolcContract(..), Method(..))
-import EVM.Types (Addr)
+import EVM.Types (Addr, W256)
 import EVM.ABI (AbiValue(..), AbiType(..), abiValueType)
 import Echidna.Types.Test (EchidnaTest(..), didFail, isOptimizationTest)
-import Echidna.Types.Tx (Tx(..), TxCall(..))
+import Echidna.Types.Tx (Tx(..), TxCall(..), maxGasPerBlock)
+import Echidna.Types.Solidity (SolConf(..))
 import Echidna.Types.Coverage (CoverageFileType(..), mergeCoverageMaps, coverageStats)
 import Echidna.Output.Source (ppCoveredCode, saveLcovHook)
 import Echidna.Output.Corpus (loadTxs)
@@ -272,6 +273,59 @@ fuzzTransactionTool args env bus _ = do
           mapM_ (\i -> atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer i (FuzzSequence seqPrototype (calcProb i))))) [0 .. nWorkers - 1]
           return $ printf "Requested fuzzing of transaction sequence '%s' on %d fuzzers" (unpack txStr) nWorkers
 
+-- | Implementation of execute_sequence tool
+-- This directly executes a concrete transaction sequence (like replaying a corpus entry)
+-- without any random noise, delays, or inserted transactions.
+executeSequenceTool :: ToolExecution
+executeSequenceTool args env bus _ = do
+  let txStr = Data.Maybe.fromMaybe "" (lookup "transactions" args)
+  case parseFuzzSequence (unpack txStr) of
+    Nothing -> return "Error: Failed to parse transaction sequence string."
+    Just seqPrototype -> do
+      -- Validate: all args must be concrete (no '?')
+      let hasWildcard = any (\(_, callArgs) -> any Data.Maybe.isNothing callArgs) seqPrototype
+      if hasWildcard
+        then return "Error: execute_sequence requires all concrete arguments (no '?' wildcards)."
+        else do
+          let dapp = env.dapp
+              methods = Map.elems dapp.abiMap
+              methodsByName = Map.fromListWith (++) [(m.name, [m]) | m <- methods]
+
+              validateCall (name, callArgs) =
+                case Map.lookup name methodsByName of
+                  Nothing -> Just $ printf "Function '%s' not found." (unpack name)
+                  Just ms ->
+                    if any (\m -> length m.inputs == length callArgs) ms
+                    then Nothing
+                    else Just $ printf "Function '%s' found but with different argument count. Expected: %s, Got: %d" (unpack name) (show $ map (length . (.inputs)) ms) (length callArgs)
+
+              errors = Data.Maybe.mapMaybe validateCall seqPrototype
+
+          if not (null errors)
+            then return $ "Error:\n" ++ unlines errors
+            else do
+              let solConf = env.cfg.solConf
+                  dst = solConf.contractAddr
+                  src = case Set.toList solConf.sender of
+                          (s:_) -> s
+                          []    -> 0x10000
+
+                  mkTx (name, callArgs) =
+                    let concreteArgs = Data.Maybe.catMaybes callArgs
+                    in Tx { call = SolCall (name, concreteArgs)
+                          , src = src
+                          , dst = dst
+                          , gas = fromIntegral maxGasPerBlock
+                          , gasprice = 0
+                          , value = 0
+                          , delay = (0 :: W256, 0 :: W256)
+                          }
+
+                  txs = map mkTx seqPrototype
+
+              atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (ExecuteSequence txs Nothing)))
+              return $ printf "Executing sequence of %d transactions on worker 0: %s" (length txs) (unpack txStr)
+
 -- | Implementation of clear_fuzz_priorities tool
 clearPrioritiesTool :: ToolExecution
 clearPrioritiesTool _ env bus _ = do
@@ -362,6 +416,7 @@ availableTools workerRefs statusRef =
   , Tool "reload_corpus" "Reload the transactions from the corpus, but without replay them" reloadCorpusTool
   , Tool "dump_lcov" "Dump coverage in LCOV format" dumpLcovTool
   , Tool "inject_fuzz_transactions" "Inject a sequence of transaction to fuzz with optional concrete arguments" fuzzTransactionTool
+  , Tool "execute_sequence" "Execute a concrete transaction sequence directly (like corpus replay) without random noise" executeSequenceTool
   , Tool "clear_fuzz_priorities" "Clear the function prioritization list used in fuzzing" clearPrioritiesTool
   --, Tool "read_logs" "Read the last 100 log messages" readLogsTool
   , Tool "show_coverage" "Show coverage report for a particular contract" showCoverageTool
@@ -419,6 +474,10 @@ runMCPServer env workerRefs port logsRef = do
                     }
                 "inject_fuzz_transactions" -> InputSchemaDefinitionObject
                     { properties = [("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' (e.g. 'func1();func2(arg1, ?)')")]
+                    , required = ["transactions"]
+                    }
+                "execute_sequence" -> InputSchemaDefinitionObject
+                    { properties = [("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' with all concrete args (e.g. 'supply(50000000000000000000);borrow(39500000000000000000)')")]
                     , required = ["transactions"]
                     }
                 "clear_fuzz_priorities" -> InputSchemaDefinitionObject
