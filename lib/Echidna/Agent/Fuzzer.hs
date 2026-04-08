@@ -7,7 +7,7 @@
 module Echidna.Agent.Fuzzer where
 
 import Control.Concurrent.STM (atomically, tryReadTChan, dupTChan, putTMVar)
-import Control.Monad (replicateM, void, forM_, when)
+import Control.Monad (replicateM, void, forM_, when, foldM)
 import Control.Monad.Reader (runReaderT, liftIO, asks, MonadReader, ask)
 import Control.Monad.State.Strict (runStateT, get, gets, modify', MonadState)
 import Control.Monad.Random.Strict (evalRandT, MonadRandom, RandT, getRandom, getRandomR)
@@ -20,16 +20,21 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import System.Directory (getCurrentDirectory)
+import Text.Printf (printf)
 
 import Echidna.Output.Source (saveLcovHook)
 import EVM.Dapp (DappInfo(..))
+import EVM.Format (showTraceTree)
 import EVM.Types (VM(..), VMType(Concrete), Expr(..), EType(..), Contract)
 import qualified EVM.Types as EVM
 
 import EVM.ABI (AbiValue)
 import Echidna.ABI (GenDict(..))
+import Echidna.Exec (execTx)
 import Echidna.Execution (replayCorpus, callseq, updateTests)
+import Echidna.UI.Report (ppTx)
 import Echidna.Mutator.Corpus (getCorpusMutation, seqMutatorsStateless, seqMutatorsStateful, fromConsts)
 import Echidna.Shrink (shrinkTest)
 import Echidna.Transaction (genTx, genTxFromPrototype)
@@ -40,7 +45,7 @@ import Echidna.Types.Campaign (WorkerState(..), CampaignConf(..))
 import Echidna.Types.Config (Env(..), EConfig(..))
 import Echidna.Types.InterWorker (AgentId(..), Bus, WrappedMessage(..), Message(..), FuzzerCmd(..))
 import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), isOpen, isOptimizationTest)
-import Echidna.Types.Tx (Tx)
+import Echidna.Types.Tx (Tx, getResult)
 import Echidna.Types.Worker (WorkerEvent(..), WorkerType(..), CampaignEvent(..), WorkerStopReason(..))
 import qualified Echidna.Types.Worker as Worker
 import Echidna.Worker (pushCampaignEvent)
@@ -219,7 +224,35 @@ fuzzerLoop callback vm testLimit bus = do
                 Just var -> atomically $ putTMVar var newCov
                 Nothing -> pure ()
              pure ()
+       Just (WrappedMessage _ (ToFuzzer tid (TraceSequence txs replyVar))) -> do
+          workerId <- gets (.workerId)
+          when (tid == workerId) $ do
+             traceStr <- traceSeq vm txs
+             liftIO $ atomically $ putTMVar replyVar traceStr
+             pure ()
        _ -> pure ()
+
+-- | Execute a transaction sequence and return a formatted trace string.
+-- Uses execTx directly to avoid side effects on the fuzzing campaign.
+traceSeq
+  :: (MonadIO m, MonadReader Env m, MonadThrow m)
+  => VM Concrete -> [Tx] -> m String
+traceSeq vm0 txs = do
+  dapp <- asks (.dapp)
+  let step (acc, vm) (i, tx) = do
+        (vmResult, vm') <- execTx vm tx
+        let txResult = getResult vmResult
+        txStr <- ppTx vm' False tx
+        let traces = T.unpack (showTraceTree dapp vm')
+            entry = unlines
+              [ printf "[%d] %s" i txStr
+              , printf "    Result: %s" (show txResult)
+              , traces
+              ]
+        pure (entry : acc, vm')
+  (entries, _) <- foldM step ([], vm0) (zip [1 :: Int ..] txs)
+  pure $ unlines $
+    ["=== Transaction Trace ===", ""] ++ reverse entries
 
 -- | Generate a new sequences of transactions, either using the corpus or with
 -- randomly created transactions

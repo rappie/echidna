@@ -6,6 +6,7 @@ module Echidna.MCP where
 import Control.Concurrent (forkIO)
 import Control.Monad (forever, unless)
 import Control.Concurrent.STM
+import System.Timeout (timeout)
 import Data.IORef (readIORef, modifyIORef', newIORef, IORef, atomicModifyIORef')
 import Data.List (find, isPrefixOf, isSuffixOf, sort, intercalate)
 import qualified Data.Maybe
@@ -273,20 +274,17 @@ fuzzTransactionTool args env bus _ = do
           mapM_ (\i -> atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer i (FuzzSequence seqPrototype (calcProb i))))) [0 .. nWorkers - 1]
           return $ printf "Requested fuzzing of transaction sequence '%s' on %d fuzzers" (unpack txStr) nWorkers
 
--- | Implementation of execute_sequence tool
--- This directly executes a concrete transaction sequence (like replaying a corpus entry)
--- without any random noise, delays, or inserted transactions.
-executeSequenceTool :: ToolExecution
-executeSequenceTool args env bus _ = do
-  let txStr = Data.Maybe.fromMaybe "" (lookup "transactions" args)
+-- | Parse a transaction string and build concrete Tx list.
+-- Shared by execute_sequence and trace_sequence.
+parseAndBuildTxs :: Env -> Text -> Either String [Tx]
+parseAndBuildTxs env txStr =
   case parseFuzzSequence (unpack txStr) of
-    Nothing -> return "Error: Failed to parse transaction sequence string."
-    Just seqPrototype -> do
-      -- Validate: all args must be concrete (no '?')
+    Nothing -> Left "Error: Failed to parse transaction sequence string."
+    Just seqPrototype ->
       let hasWildcard = any (\(_, callArgs) -> any Data.Maybe.isNothing callArgs) seqPrototype
-      if hasWildcard
-        then return "Error: execute_sequence requires all concrete arguments (no '?' wildcards)."
-        else do
+      in if hasWildcard
+        then Left "Error: All arguments must be concrete (no '?' wildcards)."
+        else
           let dapp = env.dapp
               methods = Map.elems dapp.abiMap
               methodsByName = Map.fromListWith (++) [(m.name, [m]) | m <- methods]
@@ -300,16 +298,14 @@ executeSequenceTool args env bus _ = do
                     else Just $ printf "Function '%s' found but with different argument count. Expected: %s, Got: %d" (unpack name) (show $ map (length . (.inputs)) ms) (length callArgs)
 
               errors = Data.Maybe.mapMaybe validateCall seqPrototype
-
-          if not (null errors)
-            then return $ "Error:\n" ++ unlines errors
-            else do
+          in if not (null errors)
+            then Left $ "Error:\n" ++ unlines errors
+            else
               let solConf = env.cfg.solConf
                   dst = solConf.contractAddr
                   src = case Set.toList solConf.sender of
                           (s:_) -> s
                           []    -> 0x10000
-
                   mkTx (name, callArgs) =
                     let concreteArgs = Data.Maybe.catMaybes callArgs
                     in Tx { call = SolCall (name, concreteArgs)
@@ -320,11 +316,35 @@ executeSequenceTool args env bus _ = do
                           , value = 0
                           , delay = (0 :: W256, 0 :: W256)
                           }
+              in Right $ map mkTx seqPrototype
 
-                  txs = map mkTx seqPrototype
+-- | Implementation of execute_sequence tool
+-- This directly executes a concrete transaction sequence (like replaying a corpus entry)
+-- without any random noise, delays, or inserted transactions.
+executeSequenceTool :: ToolExecution
+executeSequenceTool args env bus _ = do
+  let txStr = Data.Maybe.fromMaybe "" (lookup "transactions" args)
+  case parseAndBuildTxs env txStr of
+    Left err -> return err
+    Right txs -> do
+      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (ExecuteSequence txs Nothing)))
+      return $ printf "Executing sequence of %d transactions on worker 0: %s" (length txs) (unpack txStr)
 
-              atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (ExecuteSequence txs Nothing)))
-              return $ printf "Executing sequence of %d transactions on worker 0: %s" (length txs) (unpack txStr)
+-- | Implementation of trace_sequence tool
+-- Executes a concrete transaction sequence and returns detailed per-tx traces.
+-- Synchronous: waits for the result from the fuzzer worker.
+traceSequenceTool :: ToolExecution
+traceSequenceTool args env bus _ = do
+  let txStr = Data.Maybe.fromMaybe "" (lookup "transactions" args)
+  case parseAndBuildTxs env txStr of
+    Left err -> return err
+    Right txs -> do
+      resultVar <- newEmptyTMVarIO
+      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (TraceSequence txs resultVar)))
+      result <- timeout 60000000 (atomically $ takeTMVar resultVar)
+      case result of
+        Nothing -> return "Error: Timeout waiting for trace result (60s)."
+        Just traceStr -> return traceStr
 
 -- | Implementation of clear_fuzz_priorities tool
 clearPrioritiesTool :: ToolExecution
@@ -417,6 +437,7 @@ availableTools workerRefs statusRef =
   , Tool "dump_lcov" "Dump coverage in LCOV format" dumpLcovTool
   , Tool "inject_fuzz_transactions" "Inject a sequence of transaction to fuzz with optional concrete arguments" fuzzTransactionTool
   , Tool "execute_sequence" "Execute a concrete transaction sequence directly (like corpus replay) without random noise" executeSequenceTool
+  , Tool "trace_sequence" "Execute a concrete transaction sequence and return detailed per-tx traces with EVM call trees" traceSequenceTool
   , Tool "clear_fuzz_priorities" "Clear the function prioritization list used in fuzzing" clearPrioritiesTool
   --, Tool "read_logs" "Read the last 100 log messages" readLogsTool
   , Tool "show_coverage" "Show coverage report for a particular contract" showCoverageTool
@@ -477,6 +498,10 @@ runMCPServer env workerRefs port logsRef = do
                     , required = ["transactions"]
                     }
                 "execute_sequence" -> InputSchemaDefinitionObject
+                    { properties = [("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' with all concrete args (e.g. 'supply(50000000000000000000);borrow(39500000000000000000)')")]
+                    , required = ["transactions"]
+                    }
+                "trace_sequence" -> InputSchemaDefinitionObject
                     { properties = [("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' with all concrete args (e.g. 'supply(50000000000000000000);borrow(39500000000000000000)')")]
                     , required = ["transactions"]
                     }
