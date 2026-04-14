@@ -341,9 +341,9 @@ traceSequenceTool args env bus _ = do
     Right txs -> do
       resultVar <- newEmptyTMVarIO
       atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (TraceSequence txs resultVar)))
-      result <- timeout 60000000 (atomically $ takeTMVar resultVar)
+      result <- timeout 300000000 (atomically $ takeTMVar resultVar)
       case result of
-        Nothing -> return "Error: Timeout waiting for trace result (60s)."
+        Nothing -> return "Error: Timeout waiting for trace result (300s)."
         Just traceStr -> return traceStr
 
 -- | Implementation of clear_fuzz_priorities tool
