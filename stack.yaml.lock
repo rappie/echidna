@@ -5,17 +5,6 @@
 
 packages:
 - completed:
-    commit: 8da7ea44ebf5524dce65b14e70cee1a4413eb6f0
-    git: https://github.com/argotorg/hevm.git
-    name: hevm
-    pantry-tree:
-      sha256: e4f4d09811c0e01290761aefd41f61ecc2638a08531c727c469910627d38cea4
-      size: 10212
-    version: 0.57.0
-  original:
-    commit: 8da7ea44ebf5524dce65b14e70cee1a4413eb6f0
-    git: https://github.com/argotorg/hevm.git
-- completed:
     commit: 9fd60af428b96ae4bc63a133b3960ed934494189
     git: https://github.com/gustavo-grieco/haskell-mcp-server.git
     name: mcp-server
