@@ -98,8 +98,9 @@ ui vm dict initialCorpus cliSelectedContract = do
 
   corpusSaverStopVar <- spawnListener (saveCorpusEvent env)
 
-  workers <- forM (zip corpusChunks [0..(nworkers-1)]) $
-    liftIO . uncurry (spawnWorker env perWorkerTestLimit)
+  let spawnWorkers =
+        forM (zip corpusChunks [0..(nworkers-1)]) $
+          liftIO . uncurry (spawnWorker env perWorkerTestLimit)
 
   case effectiveMode of
     Interactive -> do
@@ -112,7 +113,10 @@ ui vm dict initialCorpus cliSelectedContract = do
             liftIO $ atomicModifyIORef' logBuffer (\logs -> (pack msg : logs, ()))
             void $ writeBChanNonBlocking uiChannel $ EventReceived ev
 
+      -- Attach the log/event forwarder before workers start so early worker
+      -- events (like startup logs) are not lost by dupChan.
       uiEventsForwarderStopVar <- spawnListener forwardEvent
+      workers <- spawnWorkers
 
       case conf.campaignConf.serverPort of
         Just port -> do
@@ -190,20 +194,23 @@ ui vm dict initialCorpus cliSelectedContract = do
     NonInteractive outputFormat -> do
       serverStopVar <- newEmptyMVar
 
-      -- Handles ctrl-c
-      liftIO $ forM_ [sigINT, sigTERM] $ \sig ->
-        let handler _ = do
-              stopWorkers workers
-              void $ tryPutMVar serverStopVar ()
-        in installHandler sig handler
-
       logBuffer <- newIORef []
 
       let forwardEvent ev = do
             msg <- runReaderT (ppLogLine vm ev) env
             liftIO $ atomicModifyIORef' logBuffer (\logs -> (pack msg : logs, ()))
             putStrLn msg
+      -- Attach the log/event forwarder before workers start so early worker
+      -- events (like startup logs) are not lost by dupChan.
       uiEventsForwarderStopVar <- spawnListener forwardEvent
+      workers <- spawnWorkers
+
+      -- Handles ctrl-c
+      liftIO $ forM_ [sigINT, sigTERM] $ \sig ->
+        let handler _ = do
+              stopWorkers workers
+              void $ tryPutMVar serverStopVar ()
+        in installHandler sig handler
 
       -- Track last update time and gas for delta calculation
       startTime <- liftIO getTimestamp
