@@ -7,6 +7,7 @@
 module Echidna.Agent.Fuzzer where
 
 import Control.Concurrent.STM (atomically, tryReadTChan, dupTChan, putTMVar)
+import Control.Applicative ((<|>))
 import Control.Monad (replicateM, void, forM_, when, foldM)
 import Control.Monad.Reader (runReaderT, liftIO, asks, MonadReader, ask)
 import Control.Monad.State.Strict (runStateT, get, gets, modify', MonadState)
@@ -15,7 +16,9 @@ import Control.Monad.Catch (MonadThrow(..))
 import Control.Monad.Trans (lift)
 import Control.Monad.IO.Class (MonadIO)
 import System.Random (mkStdGen)
+import Data.Aeson (encode, object, (.=))
 import Data.IORef (IORef, writeIORef, readIORef, atomicModifyIORef')
+import qualified Data.ByteString.Lazy.Char8 as BL8
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -32,6 +35,7 @@ import qualified EVM.Types as EVM
 
 import EVM.ABI (AbiValue)
 import Echidna.ABI (GenDict(..))
+import Echidna.Events (extractEvents)
 import Echidna.Exec (execTx)
 import Echidna.Execution (replayCorpus, callseq, updateTests)
 import Echidna.UI.Report (ppTx)
@@ -43,9 +47,9 @@ import qualified Data.List.NonEmpty as NE
 import Echidna.Types.Agent
 import Echidna.Types.Campaign (WorkerState(..), CampaignConf(..))
 import Echidna.Types.Config (Env(..), EConfig(..))
-import Echidna.Types.InterWorker (AgentId(..), Bus, WrappedMessage(..), Message(..), FuzzerCmd(..))
+import Echidna.Types.InterWorker (AgentId(..), Bus, WrappedMessage(..), Message(..), FuzzerCmd(..), TraceOptions(..))
 import Echidna.Types.Test (EchidnaTest(..), TestState(..), TestType(..), isOpen, isOptimizationTest)
-import Echidna.Types.Tx (Tx, getResult)
+import Echidna.Types.Tx (Tx, TxResult(..), getResult)
 import Echidna.Types.Worker (WorkerEvent(..), WorkerType(..), CampaignEvent(..), WorkerStopReason(..))
 import qualified Echidna.Types.Worker as Worker
 import Echidna.Worker (pushCampaignEvent)
@@ -219,37 +223,88 @@ fuzzerLoop callback vm testLimit bus = do
        Just (WrappedMessage _ (ToFuzzer tid (ExecuteSequence txs replyVar))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
-             (_, newCov) <- callseq vm txs False
-             liftIO $ case replyVar of
-                Just var -> atomically $ putTMVar var newCov
-                Nothing -> pure ()
+             report <- executeSeq vm txs
+             liftIO $ atomically $ putTMVar replyVar report
              pure ()
-       Just (WrappedMessage _ (ToFuzzer tid (TraceSequence txs replyVar))) -> do
+       Just (WrappedMessage _ (ToFuzzer tid (TraceSequence txs opts replyVar))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
-             traceStr <- traceSeq vm txs
+             traceStr <- traceSeq vm opts txs
              liftIO $ atomically $ putTMVar replyVar traceStr
              pure ()
        _ -> pure ()
+
+-- | Execute a transaction sequence and return a compact JSON report.
+-- Uses execTx directly to avoid side effects on the fuzzing campaign.
+executeSeq
+  :: (MonadIO m, MonadReader Env m, MonadThrow m)
+  => VM Concrete -> [Tx] -> m String
+executeSeq vm0 txs = do
+  dapp <- asks (.dapp)
+  let step (acc, mbFailed, mbFailedStatus, vm) (i, tx) = do
+        let burnedBefore = vm.burned
+        (vmResult, vm') <- execTx vm tx
+        let txResult = getResult vmResult
+        txStr <- ppTx vm' False tx
+        let events = extractEvents True dapp vm'
+            status = txStatus txResult events
+            failed = if status == "completed" then mbFailed else mbFailed <|> Just i
+            failedStatus = if status == "completed" then mbFailedStatus else mbFailedStatus <|> Just status
+            gasUsed = vm'.burned - burnedBefore
+            entry = object
+              [ "index" .= i
+              , "call" .= txStr
+              , "status" .= status
+              , "result" .= show txResult
+              , "gas_used" .= gasUsed
+              , "logs" .= map T.unpack events
+              ]
+        pure (entry : acc, failed, failedStatus, vm')
+  (entries, mbFailed, mbFailedStatus, finalVm) <- foldM step ([], Nothing, Nothing, vm0) (zip [1 :: Int ..] txs)
+  let overall = case mbFailedStatus of
+        Just "assertion_failed" -> "assertion_failed" :: String
+        Just _ -> "reverted"
+        Nothing -> "completed"
+      report = object
+        [ "status" .= overall
+        , "transaction_count" .= length txs
+        , "failed_tx_index" .= mbFailed
+        , "final_block_number" .= show (EVM.forceLit finalVm.block.number)
+        , "final_timestamp" .= show (EVM.forceLit finalVm.block.timestamp)
+        , "transactions" .= reverse entries
+        ]
+  pure $ BL8.unpack $ encode report
+
+txStatus :: TxResult -> [Text] -> String
+txStatus result events
+  | any isAssertionLog events = "assertion_failed"
+  | result `elem` [ReturnTrue, ReturnFalse, Stop] = "completed"
+  | otherwise = "reverted"
+
+isAssertionLog :: Text -> Bool
+isAssertionLog event =
+  "AssertFail" `T.isInfixOf` event || "Panic(AbiUInt 256 1)" `T.isInfixOf` event
 
 -- | Execute a transaction sequence and return a formatted trace string.
 -- Uses execTx directly to avoid side effects on the fuzzing campaign.
 traceSeq
   :: (MonadIO m, MonadReader Env m, MonadThrow m)
-  => VM Concrete -> [Tx] -> m String
-traceSeq vm0 txs = do
+  => VM Concrete -> TraceOptions -> [Tx] -> m String
+traceSeq vm0 opts txs = do
   dapp <- asks (.dapp)
+  let shouldShow i = maybe True (== i) opts.traceTxIndex
+      includeTrace = opts.traceVerbosity /= "summary"
   let step (acc, vm) (i, tx) = do
         (vmResult, vm') <- execTx vm tx
         let txResult = getResult vmResult
         txStr <- ppTx vm' False tx
         let traces = T.unpack (showTraceTree dapp vm')
-            entry = unlines
+            header =
               [ printf "[%d] %s" i txStr
               , printf "    Result: %s" (show txResult)
-              , traces
               ]
-        pure (entry : acc, vm')
+            entry = unlines $ if includeTrace then header ++ [traces] else header
+        pure (if shouldShow i then entry : acc else acc, vm')
   (entries, _) <- foldM step ([], vm0) (zip [1 :: Int ..] txs)
   pure $ unlines $
     ["=== Transaction Trace ===", ""] ++ reverse entries

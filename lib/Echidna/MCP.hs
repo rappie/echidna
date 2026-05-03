@@ -36,7 +36,7 @@ import Echidna.Output.Corpus (loadTxs)
 import Echidna.Types.Config (Env(..), EConfig(..))
 import Echidna.Types.World (World(..))
 import Echidna.Types.Campaign (getNFuzzWorkers, CampaignConf(..), WorkerState(..))
-import Echidna.Types.InterWorker (Bus, Message(..), WrappedMessage(..), AgentId(..), FuzzerCmd(..), BroadcastMsg(..))
+import Echidna.Types.InterWorker (Bus, Message(..), WrappedMessage(..), AgentId(..), FuzzerCmd(..), BroadcastMsg(..), TraceOptions(..))
 
 -- | Status state to track coverage info
 data StatusState = StatusState
@@ -327,8 +327,12 @@ executeSequenceTool args env bus _ = do
   case parseAndBuildTxs env txStr of
     Left err -> return err
     Right txs -> do
-      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (ExecuteSequence txs Nothing)))
-      return $ printf "Executing sequence of %d transactions on worker 0: %s" (length txs) (unpack txStr)
+      resultVar <- newEmptyTMVarIO
+      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (ExecuteSequence txs resultVar)))
+      result <- timeout 300000000 (atomically $ takeTMVar resultVar)
+      case result of
+        Nothing -> return "Error: Timeout waiting for execute_sequence result (300s)."
+        Just report -> return report
 
 -- | Implementation of trace_sequence tool
 -- Executes a concrete transaction sequence and returns detailed per-tx traces.
@@ -336,11 +340,15 @@ executeSequenceTool args env bus _ = do
 traceSequenceTool :: ToolExecution
 traceSequenceTool args env bus _ = do
   let txStr = Data.Maybe.fromMaybe "" (lookup "transactions" args)
+      opts = TraceOptions
+        { traceVerbosity = unpack $ Data.Maybe.fromMaybe "full" (lookup "verbosity" args)
+        , traceTxIndex = readMaybe . unpack =<< lookup "tx_index" args
+        }
   case parseAndBuildTxs env txStr of
     Left err -> return err
     Right txs -> do
       resultVar <- newEmptyTMVarIO
-      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (TraceSequence txs resultVar)))
+      atomically $ writeTChan bus (WrappedMessage AIId (ToFuzzer 0 (TraceSequence txs opts resultVar)))
       result <- timeout 300000000 (atomically $ takeTMVar resultVar)
       case result of
         Nothing -> return "Error: Timeout waiting for trace result (300s)."
@@ -436,8 +444,8 @@ availableTools workerRefs statusRef =
   , Tool "reload_corpus" "Reload the transactions from the corpus, but without replay them" reloadCorpusTool
   , Tool "dump_lcov" "Dump coverage in LCOV format" dumpLcovTool
   , Tool "inject_fuzz_transactions" "Inject a sequence of transaction to fuzz with optional concrete arguments" fuzzTransactionTool
-  , Tool "execute_sequence" "Execute a concrete transaction sequence directly (like corpus replay) without random noise" executeSequenceTool
-  , Tool "trace_sequence" "Execute a concrete transaction sequence and return detailed per-tx traces with EVM call trees" traceSequenceTool
+  , Tool "execute_sequence" "Execute a concrete transaction sequence directly without random noise and return a compact structured report" executeSequenceTool
+  , Tool "trace_sequence" "Execute a concrete transaction sequence and return per-tx traces; optional verbosity and tx_index narrow output" traceSequenceTool
   , Tool "clear_fuzz_priorities" "Clear the function prioritization list used in fuzzing" clearPrioritiesTool
   --, Tool "read_logs" "Read the last 100 log messages" readLogsTool
   , Tool "show_coverage" "Show coverage report for a particular contract" showCoverageTool
@@ -502,7 +510,11 @@ runMCPServer env workerRefs port logsRef = do
                     , required = ["transactions"]
                     }
                 "trace_sequence" -> InputSchemaDefinitionObject
-                    { properties = [("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' with all concrete args (e.g. 'supply(50000000000000000000);borrow(39500000000000000000)')")]
+                    { properties =
+                        [ ("transactions", InputSchemaDefinitionProperty "string" "The transaction sequence string separated by ';' with all concrete args (e.g. 'supply(50000000000000000000);borrow(39500000000000000000)')")
+                        , ("verbosity", InputSchemaDefinitionProperty "string" "Trace verbosity: 'summary' omits call trees; 'full' includes call trees (default)")
+                        , ("tx_index", InputSchemaDefinitionProperty "string" "Optional 1-based transaction index to trace")
+                        ]
                     , required = ["transactions"]
                     }
                 "clear_fuzz_priorities" -> InputSchemaDefinitionObject

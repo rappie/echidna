@@ -17,8 +17,14 @@ data FuzzerCmd
   | SolutionFound [Tx]
   | FuzzSequence [(Text, [Maybe AbiValue])] Double
   | ClearPrioritization
-  | ExecuteSequence [Tx] (Maybe (TMVar Bool))
-  | TraceSequence [Tx] (TMVar String)
+  | ExecuteSequence [Tx] (TMVar String)
+  | TraceSequence [Tx] TraceOptions (TMVar String)
+
+data TraceOptions = TraceOptions
+  { traceVerbosity :: String
+  , traceTxIndex :: Maybe Int
+  }
+  deriving (Show)
 
 instance Show FuzzerCmd where
   show DumpLcov = "DumpLcov"
@@ -26,7 +32,7 @@ instance Show FuzzerCmd where
   show (FuzzSequence s p) = "FuzzSequence " ++ show s ++ " (" ++ show p ++ ")"
   show ClearPrioritization = "ClearPrioritization"
   show (ExecuteSequence txs _) = "ExecuteSequence " ++ show txs
-  show (TraceSequence txs _) = "TraceSequence " ++ show txs
+  show (TraceSequence txs opts _) = "TraceSequence " ++ show txs ++ " " ++ show opts
 
 -- | Symbolic specific commands
 newtype SymbolicCmd
