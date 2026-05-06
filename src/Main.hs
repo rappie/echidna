@@ -133,6 +133,7 @@ data Options = Options
   { cliFilePath         :: NE.NonEmpty FilePath
   , cliWorkers          :: Maybe Word8
   , cliServerPort       :: Maybe Word16
+  , cliServerHost       :: Maybe String
   , cliSelectedContract :: Maybe Text
   , cliConfigFilepath   :: Maybe FilePath
   , cliOutputFormat     :: Maybe OutputFormat
@@ -171,6 +172,12 @@ bool = maybeReader (f . map toLower) where
   f "false" = Just False
   f _ = Nothing
 
+nonEmptyString :: ReadM String
+nonEmptyString = eitherReader $ \input ->
+  if null input
+    then Left "must be a non-empty string"
+    else Right input
+
 options :: Parser Options
 options = Options . NE.fromList
   <$> some (argument str (metavar "FILES"
@@ -180,7 +187,10 @@ options = Options . NE.fromList
     <> help "Number of workers to run")
   <*> optional (option auto $ long "server"
     <> metavar "PORT"
-    <> help "Run events server on the given port")
+    <> help "Run MCP server on the given port")
+  <*> optional (option nonEmptyString $ long "server-host"
+    <> metavar "HOST"
+    <> help "Host to bind the MCP server to when --server is enabled (default: 127.0.0.1)")
   <*> optional (option str $ long "contract"
     <> metavar "CONTRACT"
     <> help "Contract to analyze")
@@ -295,6 +305,7 @@ overrideConfig config Options{..} = do
       , seed = cliSeed <|> campaignConf.seed
       , workers = cliWorkers <|> campaignConf.workers
       , serverPort = cliServerPort <|> campaignConf.serverPort
+      , serverHost = fromMaybe campaignConf.serverHost cliServerHost
       , symExec = fromMaybe campaignConf.symExec cliSymExec
       , symExecTargets = if null cliSymExecTargets then campaignConf.symExecTargets else cliSymExecTargets
       , symExecTimeout = fromMaybe campaignConf.symExecTimeout cliSymExecTimeout

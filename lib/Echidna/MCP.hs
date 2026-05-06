@@ -452,8 +452,8 @@ availableTools workerRefs statusRef =
   ]
 
 -- | Run the MCP Server
-runMCPServer :: Env -> [IORef WorkerState] -> Int -> IORef [Text] -> IO ()
-runMCPServer env workerRefs port logsRef = do
+runMCPServer :: Env -> [IORef WorkerState] -> String -> Int -> IORef [Text] -> IO ()
+runMCPServer env workerRefs host port logsRef = do
     statusRef <- newIORef (StatusState Nothing [])
 
     -- Spawn listener for coverage events
@@ -477,7 +477,7 @@ runMCPServer env workerRefs port logsRef = do
 
     let httpConfig = HttpConfig
             { httpPort = port
-            , httpHost = "127.0.0.1"
+            , httpHost = host
             , httpEndpoint = "/mcp"
             , httpVerbose = False
             }

@@ -122,8 +122,10 @@ ui vm dict initialCorpus cliSelectedContract = do
 
       case conf.campaignConf.serverPort of
         Just port -> do
-          liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://127.0.0.1:" ++ show port ++ "/mcp"))
-          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) (fromIntegral port) logBuffer
+          let host = conf.campaignConf.serverHost
+          liftIO $
+            pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ host ++ ":" ++ show port ++ "/mcp"))
+          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) host (fromIntegral port) logBuffer
         Nothing -> pure ()
 
       ticker <- liftIO . forkIO . forever $ do
@@ -229,8 +231,10 @@ ui vm dict initialCorpus cliSelectedContract = do
 
       case conf.campaignConf.serverPort of
         Just port -> do
-          liftIO $ pushCampaignEvent env (ServerLog ("MCP Server running at http://127.0.0.1:" ++ show port ++ "/mcp"))
-          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) (fromIntegral port) logBuffer
+          let host = conf.campaignConf.serverHost
+          liftIO $
+            pushCampaignEvent env (ServerLog ("MCP Server running at http://" ++ host ++ ":" ++ show port ++ "/mcp"))
+          void $ liftIO $ forkIO $ runMCPServer env (map snd workers) host (fromIntegral port) logBuffer
         Nothing -> pure ()
 
       ticker <- liftIO . forkIO . forever $ do
