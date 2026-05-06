@@ -192,14 +192,17 @@ fuzzerLoop callback vm testLimit bus = do
         pure Nothing
 
   checkMessages = do
-     -- Non-blocking read
+     -- Non-blocking reads; drain the current queue so direct MCP requests do not
+     -- sit behind unrelated worker messages for multiple fuzz iterations.
      msg <- liftIO $ atomically $ tryReadTChan bus
      case msg of
+       Nothing -> pure ()
        Just (WrappedMessage _ (ToFuzzer tid (SolutionFound _))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              -- Received help!
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid DumpLcov)) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
@@ -210,29 +213,34 @@ fuzzerLoop callback vm testLimit bus = do
                void $ saveLcovHook env dir env.sourceCache contracts
                putStrLn $ "Fuzzer " ++ show workerId ++ ": dumped LCOV coverage."
             pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (FuzzSequence txs prob))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              modify' $ \s -> s { prioritizedSequences = (prob, txs) : s.prioritizedSequences }
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid ClearPrioritization)) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              modify' $ \s -> s { prioritizedSequences = [] }
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (ExecuteSequence txs replyVar))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              report <- executeSeq vm txs
              liftIO $ atomically $ putTMVar replyVar report
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (TraceSequence txs opts replyVar))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              traceStr <- traceSeq vm opts txs
              liftIO $ atomically $ putTMVar replyVar traceStr
              pure ()
-       _ -> pure ()
+          checkMessages
+       Just _ -> checkMessages
 
 -- | Execute a transaction sequence and return a compact JSON report.
 -- Uses execTx directly to avoid side effects on the fuzzing campaign.
