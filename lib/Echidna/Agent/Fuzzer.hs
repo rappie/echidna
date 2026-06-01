@@ -192,14 +192,17 @@ fuzzerLoop callback vm testLimit bus = do
         pure Nothing
 
   checkMessages = do
-     -- Non-blocking read
+     -- Non-blocking reads; drain the current queue so direct MCP requests do not
+     -- sit behind unrelated worker messages for multiple fuzz iterations.
      msg <- liftIO $ atomically $ tryReadTChan bus
      case msg of
+       Nothing -> pure ()
        Just (WrappedMessage _ (ToFuzzer tid (SolutionFound _))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              -- Received help!
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid DumpLcov)) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
@@ -210,22 +213,26 @@ fuzzerLoop callback vm testLimit bus = do
                void $ saveLcovHook env dir env.sourceCache contracts
                putStrLn $ "Fuzzer " ++ show workerId ++ ": dumped LCOV coverage."
             pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (FuzzSequence txs prob))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              modify' $ \s -> s { prioritizedSequences = (prob, txs) : s.prioritizedSequences }
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid ClearPrioritization)) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $ do
              modify' $ \s -> s { prioritizedSequences = [] }
              pure ()
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (ExecuteSequence txs trace replyVar))) -> do
           workerId <- gets (.workerId)
           -- Only worker 0 responds; tid is expected to be 0 from MCP.
           when (tid == workerId && workerId == 0) $ do
              report <- executeSeq trace vm txs
              liftIO $ atomically $ putTMVar replyVar report
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid (EnableSampling sig))) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $
@@ -235,11 +242,13 @@ fuzzerLoop callback vm testLimit bus = do
                then s
                else s { sampledFunctions =
                           Map.insert sig emptySampleStats s.sampledFunctions }
+          checkMessages
        Just (WrappedMessage _ (ToFuzzer tid ClearSampling)) -> do
           workerId <- gets (.workerId)
           when (tid == workerId) $
              modify' $ \s -> s { sampledFunctions = Map.empty }
-       _ -> pure ()
+          checkMessages
+       Just _ -> checkMessages
 
 -- | Replay a concrete sequence and return a compact JSON report.
 --   Uses 'execTx' directly so the running fuzzing campaign is not perturbed
