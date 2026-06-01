@@ -35,6 +35,7 @@ seedTests =
         , coverageFormats = [Txt,Html,Lcov]
         , workers = Nothing
         , serverPort = Nothing
+        , serverHost = "127.0.0.1"
         }
       }
       & overrideQuiet

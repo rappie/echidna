@@ -49,6 +49,8 @@ configTests = testGroup "Configuration tests" $
       assertBool "" $ defaultConfig.campaignConf.dictDynamicConstantsLimit == defaultDictDynamicConstantsLimit
       assertBool "" $ defaultConfig.campaignConf.dictDynamicValuesLimit == defaultDictDynamicValuesLimit
       assertBool "" $ defaultConfig.campaignConf.dictDynamicCallsLimit == defaultDictDynamicCallsLimit
+  , testCase "MCP server host defaults to localhost" $
+      assertBool "" $ defaultConfig.campaignConf.serverHost == "127.0.0.1"
   , testCase "dynamic dictionary limits reject negative values" $
       mapM_ assertRejectsNegative
         ([ "dictDynamicConstantsLimit"
