@@ -6,6 +6,7 @@ import Tests.Cheat (cheatTests)
 import Tests.Compile (compilationTests)
 import Tests.Config (configTests)
 import Tests.Coverage (coverageTests)
+import Tests.Dict (dictTests)
 import Tests.Encoding (encodingJSONTests)
 import Tests.Foundry (foundryTests)
 import Tests.FoundryTestGen (foundryTestGenTests)
@@ -28,6 +29,7 @@ main = withCurrentDirectory "./tests/solidity" . defaultMain $
            , integrationTests
            , valuesTests
            , coverageTests
+           , dictTests
            , abiv2Tests
            , assertionTests
            , overflowTests
